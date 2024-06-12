@@ -177,7 +177,7 @@ sfsistat mlfi_eom(SMFICTX *ctx)
 	if (priv == NULL) return SMFIS_CONTINUE;
 
 	if (priv->reject) {
-		smfi_setreply(ctx, "550", "5.7.1", "Rejected due to unmatching envelope and header sender.");
+		smfi_setreply(ctx, "550", "5.7.1", "Rejected due to mismatched envelope and header sender.");
 		mlfi_cleanup(ctx);
 		return SMFIS_REJECT;
 	}
