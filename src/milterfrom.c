@@ -51,6 +51,12 @@ struct mlfiPriv {
 	int is_auth;
 	char *env_from;
 	size_t env_from_len;
+	char *msg_from;
+	size_t msg_from_len;
+	char *auth_authen;
+	size_t auth_authen_len;
+	char *sender;
+	size_t sender_len;
 	int reject;
 };
 
@@ -128,6 +134,8 @@ sfsistat mlfi_envfrom(SMFICTX *ctx, char **envfrom)
 	}
 
 	// Set private values.
+	priv->auth_authen = smfi_getsymval(ctx, "{auth_authen}");
+	priv->auth_authen_len = strlen(priv->auth_authen);
 	priv->is_auth = smfi_getsymval(ctx, "{auth_type}") ? 1 : 0;
 	priv->env_from = fromcp;
 	priv->env_from_len = len;
@@ -146,9 +154,16 @@ sfsistat mlfi_header(SMFICTX *ctx, char *headerf, char *headerv)
 
 	// Perform checks if the sender is authenticated and the message is not rejected yet (the mail may contain multiple from tags, all have to match!).
 	if (priv->is_auth && !priv->reject) {
+
+		// If this is a From: header
 		if (strcasecmp(headerf, "from") == 0) {
 			size_t len = 0;
 			const char *from = parse_address(headerv, &len);
+			char *fromcp = NULL;
+			fromcp = strndup(from, len);
+
+			priv->msg_from = fromcp;
+			priv->msg_from_len = len;
 
 			// Check whether header from matches envelope from and reject if not.
 			if (len != priv->env_from_len || strncasecmp(from, priv->env_from, len) != 0) {
@@ -159,7 +174,33 @@ sfsistat mlfi_header(SMFICTX *ctx, char *headerf, char *headerv)
 				msg_len = 55 + len + priv->env_from_len;
 				msg = malloc(msg_len);
 				if (msg != NULL) { 
-					snprintf(msg, msg_len, "Rejecting Envelope From (%s) and Header From (%s) mismatch", priv->env_from, from);
+					snprintf(msg, msg_len, "Rejecting: Envelope from (%s) and header From (%s) mismatch", priv->env_from, from);
+					log_event(ctx, msg);
+				}
+				free(msg);
+			}
+		}
+
+		// If this is a Sender: header
+		if (strcasecmp(headerf, "sender") == 0) {
+			size_t len = 0;
+			const char *sender = parse_address(headerv, &len);
+			char *sendercp = NULL;
+			sendercp = strndup(sender, len);
+
+			priv->sender = sendercp;
+			priv->sender_len = len;
+
+			// Check whether sender header matches authenticated user and reject if not.
+			if (len != priv->auth_authen_len || strncasecmp(sender, priv->auth_authen, len) != 0) {
+				char *msg;
+				size_t msg_len = 0;
+
+				priv->reject = 2;
+				msg_len = 36 + len;
+				msg = malloc(msg_len);
+				if (msg != NULL) { 
+					snprintf(msg, msg_len, "Rejecting: Sender header (%s) mismatch", sender);
 					log_event(ctx, msg);
 				}
 				free(msg);
@@ -173,13 +214,48 @@ sfsistat mlfi_header(SMFICTX *ctx, char *headerf, char *headerv)
 sfsistat mlfi_eom(SMFICTX *ctx)
 {
 	struct mlfiPriv *priv = MLFIPRIV;
+	char mbuf[512];
 
 	if (priv == NULL) return SMFIS_CONTINUE;
 
-	if (priv->reject) {
-		smfi_setreply(ctx, "550", "5.7.1", "Rejected due to mismatched envelope and header sender.");
+	if (priv->reject == 1) {
+		snprintf(mbuf, sizeof mbuf, "<%s> Sender address rejected: does not match envelope address %s", priv->msg_from, priv->env_from);
+		smfi_setreply(ctx, "550", "5.7.1", mbuf);
 		mlfi_cleanup(ctx);
 		return SMFIS_REJECT;
+	} else if (priv->reject == 2) {
+		snprintf(mbuf, sizeof mbuf, "<%s> Sender address rejected: not owned by user %s", priv->sender, priv->auth_authen);
+		smfi_setreply(ctx, "550", "5.7.1", mbuf);
+		mlfi_cleanup(ctx);
+		return SMFIS_REJECT;
+	}
+
+	size_t len = (priv->auth_authen_len < priv->env_from_len) ? priv->auth_authen_len : priv->env_from_len;
+	if (priv->sender_len == 0 && strncasecmp(priv->auth_authen, priv->env_from, len) != 0) {
+		// No sender header and the author doesn't match the from address - need to add a Sender: header
+		int ret;
+		char *mymsg;
+		size_t mymsg_len = 200;
+		mymsg = malloc(mymsg_len);
+
+		// Ideally we'd add the header ourselves but this fails for some reason so we reject the message and tell the user to add the header
+		snprintf(mymsg, mymsg_len, "Rejecting 'Sender:' header missing when masquerading");
+		log_event(ctx, mymsg);
+
+		snprintf(mbuf, sizeof mbuf, "<%s> Sender address rejected: 'Sender:' header required when masquerading", priv->auth_authen);
+		smfi_setreply(ctx, "550", "5.7.1", mbuf);
+		mlfi_cleanup(ctx);
+		return SMFIS_REJECT;
+
+		/*
+		snprintf(mymsg, mymsg_len, "Adding 'Sender: %s' header", priv->auth_authen);
+		log_event(ctx, mymsg);
+		
+		ret = smfi_addheader(ctx, "Sender", priv->auth_authen);
+		
+		snprintf(mymsg, mymsg_len, "smfi_addheader result = %i", ret);
+		log_event(ctx, mymsg);
+		*/
 	}
 	mlfi_cleanup(ctx);
 	return SMFIS_CONTINUE;
@@ -208,7 +284,7 @@ struct smfiDesc smfilter =
 {
 	"Header from check", /* filter name */
 	SMFI_VERSION,        /* version code -- do not change */
-	0,                   /* flags */
+	SMFIF_ADDHDRS,       /* flags */
 	NULL,                /* connection info filter */
 	NULL,                /* SMTP HELO command filter */
 	mlfi_envfrom,        /* envelope sender filter */
