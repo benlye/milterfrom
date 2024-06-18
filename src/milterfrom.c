@@ -197,7 +197,7 @@ sfsistat mlfi_header(SMFICTX *ctx, char *headerf, char *headerv)
 				size_t msg_len = 0;
 
 				priv->reject = 2;
-				msg_len = 36 + len;
+				msg_len = 38 + len;
 				msg = malloc(msg_len);
 				if (msg != NULL) { 
 					snprintf(msg, msg_len, "Rejecting: Sender header (%s) mismatch", sender);
